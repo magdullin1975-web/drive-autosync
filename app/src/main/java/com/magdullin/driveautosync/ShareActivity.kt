@@ -36,7 +36,7 @@ class ShareActivity : Activity() {
             runOnUiThread {
                 Toast.makeText(
                     app,
-                    if (ok > 0) "Отправляю на Google Диск: $ok → ${Prefs.rootName(app)}/${Prefs.deviceName(app)}/Geteilt"
+                    if (ok > 0) "Отправляю на Google Диск: $ok → ${Prefs.rootName(app)}/${Prefs.deviceName(app)}/Shared"
                     else "Не удалось прочитать файлы",
                     Toast.LENGTH_LONG
                 ).show()

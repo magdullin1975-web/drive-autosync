@@ -137,7 +137,7 @@ class MainActivity : Activity() {
         folderBox = vbox()
         root.addView(folderBox)
         root.addView(button("＋ Добавить папку") { pickFolder() })
-        root.addView(text("Любой файл из любого приложения: «Поделиться» → Drive Autosync — сразу уйдёт на Диск в папку Geteilt."))
+        root.addView(text("Любой файл из любого приложения: «Поделиться» → Drive Autosync — сразу уйдёт на Диск в папку Shared."))
 
         root.addView(header("Настройки"))
         root.addView(text("Главная папка на Google Диске:"))

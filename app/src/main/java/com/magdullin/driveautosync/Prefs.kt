@@ -8,7 +8,7 @@ import org.json.JSONObject
 
 /** Все настройки и состояние приложения. */
 object Prefs {
-    const val DEFAULT_ROOT = "00_Входящие"
+    const val DEFAULT_ROOT = "00_Inbox"
 
     private fun sp(c: Context): SharedPreferences =
         c.applicationContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -33,7 +33,11 @@ object Prefs {
     fun baseline(c: Context, path: String): Long = sp(c).getLong("base_$path", 0L)
 
     // ---- куда загружать ----
-    fun rootName(c: Context): String = sp(c).getString("root", null) ?: DEFAULT_ROOT
+    fun rootName(c: Context): String {
+        val v = sp(c).getString("root", null)
+        // старое русское имя переименовано на Диске в 00_Inbox
+        return if (v == null || v == "00_Входящие") DEFAULT_ROOT else v
+    }
 
     fun setRootName(c: Context, v: String) {
         sp(c).edit().putString("root", v).apply()

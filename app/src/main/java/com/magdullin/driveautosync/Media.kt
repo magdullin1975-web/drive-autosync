@@ -213,7 +213,7 @@ object ShareQueue {
                     MediaItem(
                         uri = Uri.fromFile(f),
                         name = f.name,
-                        relativePath = "Geteilt/",
+                        relativePath = "Shared/",
                         size = f.length(),
                         mtime = f.lastModified(),
                         mime = Drive.mimeOf(f.name),
