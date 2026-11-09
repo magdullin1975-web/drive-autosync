@@ -38,6 +38,7 @@ class MainActivity : Activity() {
         const val ACTION_UPDATE = "com.magdullin.driveautosync.UPDATE"
         private const val RC_AUTH = 100
         private const val RC_PERMS = 101
+        private const val RC_TREE = 102
     }
 
     private val scope = MainScope()
@@ -136,6 +137,7 @@ class MainActivity : Activity() {
         folderBox = vbox()
         root.addView(folderBox)
         root.addView(button("＋ Добавить папку") { pickFolder() })
+        root.addView(text("Любой файл из любого приложения: «Поделиться» → Drive Autosync — сразу уйдёт на Диск в папку Geteilt."))
 
         root.addView(header("Настройки"))
         root.addView(text("Главная папка на Google Диске:"))
@@ -173,6 +175,8 @@ class MainActivity : Activity() {
             .append('\n')
         sb.append("Загружено файлов: ${Db.get(this).countDone()}\n")
         sb.append("Куда: Google Диск / ${Prefs.rootName(this)} / ${Prefs.deviceName(this)}\n")
+        val q = ShareQueue.count(this)
+        if (q > 0) sb.append("В очереди «Поделиться»: $q\n")
         val w = Prefs.waitingWifi(this)
         if (w > 0) sb.append("Ждут Wi‑Fi (большие файлы): $w\n")
         Prefs.lastError(this)?.let { sb.append("❗ $it\n") }
@@ -198,12 +202,12 @@ class MainActivity : Activity() {
             shownFolders = folders
             folderBox.removeAllViews()
             if (folders.isEmpty()) {
-                folderBox.addView(text("Пока нет папок. Добавьте, например, Download и Pictures. Загружаются фото, видео и аудио."))
+                folderBox.addView(text("Пока нет папок. Добавьте, например, Download и Pictures (фото, видео, аудио) и Documents (любые файлы)."))
             }
             for (p in folders) {
                 val row = LinearLayout(this)
                 row.orientation = LinearLayout.HORIZONTAL
-                val t = text("📁 " + p.trimEnd('/'))
+                val t = text(if (Docs.isTree(p)) Docs.label(p) else "🖼 " + p.trimEnd('/'))
                 row.addView(t, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
                 row.addView(button("Убрать") { confirmRemove(p) })
                 folderBox.addView(row)
@@ -237,6 +241,17 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == RC_TREE) {
+            val uri = data?.data
+            if (resultCode != RESULT_OK || uri == null) return
+            try {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                askBaseline(Docs.PREFIX + uri.toString())
+            } catch (e: Exception) {
+                showError("Нет доступа к папке", e.message ?: e.toString())
+            }
+            return
+        }
         if (requestCode != RC_AUTH) return
         if (data == null) {
             toast("Вход отменён")
@@ -285,27 +300,51 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------------ выбор папок
 
     private fun pickFolder() {
-        if (!Media.hasAccess(this)) {
-            toast("Сначала разрешите доступ к фото и видео")
-            requestStorage()
-            return
-        }
         scope.launch {
-            val list = withContext(Dispatchers.IO) { Media.folders(this@MainActivity) }
-            if (list.isEmpty()) {
-                toast("На устройстве не найдено фото, видео или аудио")
-                return@launch
+            val media = if (Media.hasAccess(this@MainActivity)) {
+                withContext(Dispatchers.IO) { Media.folders(this@MainActivity) }
+            } else {
+                emptyList()
             }
-            val labels = list.map { (p, n) ->
+            val labels = mutableListOf("📄 Папка с документами (любые файлы)…")
+            if (!Media.hasAccess(this@MainActivity)) labels.add("🔓 Разрешить доступ к фото и видео…")
+            media.forEach { (p, n) ->
                 val depth = p.trimEnd('/').count { it == '/' }
-                "    ".repeat(depth) + "📁 " + p.trimEnd('/').substringAfterLast('/') + "  ($n)"
+                labels.add("    ".repeat(depth) + "🖼 " + p.trimEnd('/').substringAfterLast('/') + "  ($n)")
             }
+            val offset = labels.size - media.size
             AlertDialog.Builder(this@MainActivity)
                 .setTitle("Какую папку загружать?")
-                .setItems(labels.toTypedArray()) { _, w -> askBaseline(list[w].first) }
+                .setItems(labels.toTypedArray()) { _, w ->
+                    when {
+                        w == 0 -> pickDocsFolder()
+                        w < offset -> requestStorage()
+                        else -> askBaseline(media[w - offset].first)
+                    }
+                }
                 .setNegativeButton("Отмена", null)
                 .show()
         }
+    }
+
+    private fun pickDocsFolder() {
+        AlertDialog.Builder(this)
+            .setTitle("Папка с документами")
+            .setMessage(
+                "Откроется окно Android — выберите папку (например, Documents или папку внутри Download) " +
+                    "и нажмите «Diesen Ordner verwenden» → «Zulassen».\n\n" +
+                    "Саму папку Download целиком Android выбрать не даёт. Документы оттуда отправляйте " +
+                    "через «Поделиться → Drive Autosync»."
+            )
+            .setPositiveButton("Выбрать папку") { _, _ ->
+                try {
+                    startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), RC_TREE)
+                } catch (e: Exception) {
+                    toast("Не удалось открыть выбор папки")
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 
     private fun askBaseline(folder: String) {
@@ -314,7 +353,7 @@ class MainActivity : Activity() {
             return
         }
         AlertDialog.Builder(this)
-            .setTitle(folder.trimEnd('/'))
+            .setTitle(Docs.label(folder))
             .setMessage("Загрузить на Диск и файлы, которые уже лежат в этой папке?\n\n«Только новые» — загружать то, что появится с этого момента.")
             .setPositiveButton("Да, все файлы") { _, _ -> addFolder(folder, 0L) }
             .setNegativeButton("Только новые") { _, _ -> addFolder(folder, System.currentTimeMillis()) }
@@ -332,9 +371,17 @@ class MainActivity : Activity() {
     private fun confirmRemove(path: String) {
         AlertDialog.Builder(this)
             .setTitle("Убрать папку?")
-            .setMessage("${path.trimEnd('/')}\n\nФайлы на телефоне и на Google Диске останутся, просто новые больше не будут загружаться.")
+            .setMessage("${Docs.label(path)}\n\nФайлы на телефоне и на Google Диске останутся, просто новые больше не будут загружаться.")
             .setPositiveButton("Убрать") { _, _ ->
                 Prefs.removeFolder(this, path)
+                if (Docs.isTree(path)) {
+                    try {
+                        contentResolver.releasePersistableUriPermission(
+                            Docs.treeUri(path), Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                    } catch (e: Exception) {
+                    }
+                }
                 refresh()
             }
             .setNegativeButton("Отмена", null)

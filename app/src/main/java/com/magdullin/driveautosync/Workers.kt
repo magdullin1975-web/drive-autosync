@@ -84,17 +84,18 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     private suspend fun runSync(): Result {
         val c = applicationContext
         val folders = Prefs.folders(c)
-        if (folders.isEmpty()) return Result.success()
+        val shared = ShareQueue.count(c)
+        if (folders.isEmpty() && shared == 0) return Result.success()
 
-        if (!Media.hasAccess(c)) {
+        val needsMedia = folders.any { !Docs.isTree(it) }
+        if (needsMedia && !Media.hasAccess(c)) {
             Notifier.problem(
                 c, Notifier.ID_STORAGE, "Нет доступа к фото и видео",
                 "Откройте Drive Autosync и нажмите «Разрешить доступ к фото и видео»."
             )
-            Prefs.recordError(c, "Нет доступа к фото и видео")
-            return Result.success()
+        } else {
+            Notifier.clear(c, Notifier.ID_STORAGE)
         }
-        Notifier.clear(c, Notifier.ID_STORAGE)
 
         val foreground = try {
             setForeground(Notifier.foregroundInfo(c))
@@ -138,9 +139,19 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
         try {
             dirs.validateRoot()
+            for ((qdir, item) in ShareQueue.items(c)) {
+                if (isStopped) break
+                Uploader.upload(c, drive, db, dirs, item, null)
+                qdir.deleteRecursively()
+            }
             outer@ for (folder in folders) {
                 val baseline = Prefs.baseline(c, folder)
-                for (item in Media.scan(c, folder)) {
+                val items = when {
+                    Docs.isTree(folder) -> Docs.scan(c, folder)
+                    Media.hasAccess(c) -> Media.scan(c, folder)
+                    else -> emptyList()
+                }
+                for (item in items) {
                     if (isStopped) break@outer
                     if (System.currentTimeMillis() - started > limit) {
                         more = true
@@ -152,7 +163,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                         continue
                     }
                     val rec = db.find(item.key)
-                    if (rec?.driveId != null && rec.size == item.size && rec.mtime == item.mtime) continue
+                    if (rec?.driveId != null && rec.size == item.size && kotlin.math.abs(rec.mtime - item.mtime) < 2000L) continue
                     if (wifiOnly && !unmetered && item.size > BIG_FILE) {
                         waitingWifi++
                         continue
@@ -229,7 +240,7 @@ class WatchdogWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
                 "Откройте Drive Autosync: проверьте интернет и отключите для приложения экономию батареи."
             )
         }
-        if (!Media.hasAccess(c)) {
+        if (Prefs.folders(c).any { !Docs.isTree(it) } && !Media.hasAccess(c)) {
             Notifier.problem(
                 c, Notifier.ID_STORAGE, "Нет доступа к фото и видео",
                 "Откройте Drive Autosync и нажмите «Разрешить доступ к фото и видео»."

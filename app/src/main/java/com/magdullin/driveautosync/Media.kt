@@ -122,3 +122,107 @@ object Media {
         return out.sortedBy { it.mtime }
     }
 }
+
+/**
+ * Папки с документами (любые файлы), выбранные через стандартное окно Android.
+ * Хранятся в настройках как "tree:<uri>".
+ */
+object Docs {
+    const val PREFIX = "tree:"
+
+    fun isTree(folder: String) = folder.startsWith(PREFIX)
+
+    fun treeUri(folder: String): Uri = Uri.parse(folder.removePrefix(PREFIX))
+
+    /** Путь вида "Documents/Rechnungen/" из id документа ("primary:Documents/Rechnungen"). */
+    private fun pathOf(docId: String): String {
+        val p = docId.substringAfter(':', "").trim('/')
+        return if (p.isEmpty()) "" else "$p/"
+    }
+
+    fun label(folder: String): String {
+        if (!isTree(folder)) return folder.trimEnd('/')
+        return try {
+            val id = android.provider.DocumentsContract.getTreeDocumentId(treeUri(folder))
+            val p = pathOf(id).trimEnd('/')
+            "📄 " + (if (p.isEmpty()) "Память устройства" else p)
+        } catch (e: Exception) {
+            "📄 папка документов"
+        }
+    }
+
+    fun scan(c: Context, folder: String): List<MediaItem> {
+        val tree = treeUri(folder)
+        val out = ArrayList<MediaItem>()
+        try {
+            val rootId = android.provider.DocumentsContract.getTreeDocumentId(tree)
+            walk(c, tree, rootId, 0, out)
+        } catch (e: Exception) {
+            // доступ к папке потерян
+        }
+        return out.sortedBy { it.mtime }
+    }
+
+    private fun walk(c: Context, tree: Uri, docId: String, depth: Int, out: MutableList<MediaItem>) {
+        val children = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId)
+        val proj = arrayOf(
+            android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            android.provider.DocumentsContract.Document.COLUMN_MIME_TYPE,
+            android.provider.DocumentsContract.Document.COLUMN_SIZE,
+            android.provider.DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+        )
+        c.contentResolver.query(children, proj, null, null, null)?.use { cur ->
+            while (cur.moveToNext()) {
+                val id = cur.getString(0) ?: continue
+                val name = cur.getString(1) ?: continue
+                if (name.startsWith(".")) continue
+                val mime = cur.getString(2) ?: ""
+                if (mime == android.provider.DocumentsContract.Document.MIME_TYPE_DIR) {
+                    if (depth < 6 && name != "Android") walk(c, tree, id, depth + 1, out)
+                } else {
+                    val full = pathOf(id) // "Documents/a/file.pdf/"
+                    val rel = full.trimEnd('/').substringBeforeLast('/', "")
+                    out.add(
+                        MediaItem(
+                            uri = android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, id),
+                            name = name,
+                            relativePath = if (rel.isEmpty()) "" else "$rel/",
+                            size = if (cur.isNull(3)) 0L else cur.getLong(3),
+                            mtime = if (cur.isNull(4)) 0L else cur.getLong(4),
+                            mime = mime.ifEmpty { Drive.mimeOf(name) },
+                        )
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Файлы, отправленные через «Поделиться → Drive Autosync». Лежат во внутренней папке до загрузки. */
+object ShareQueue {
+    fun dir(c: Context): java.io.File = java.io.File(c.filesDir, "share").apply { mkdirs() }
+
+    fun items(c: Context): List<Pair<java.io.File, MediaItem>> {
+        val out = ArrayList<Pair<java.io.File, MediaItem>>()
+        for (d in dir(c).listFiles() ?: emptyArray()) {
+            val f = d.listFiles()?.firstOrNull { it.isFile } ?: continue
+            out.add(
+                Pair(
+                    d,
+                    MediaItem(
+                        uri = Uri.fromFile(f),
+                        name = f.name,
+                        relativePath = "Geteilt/",
+                        size = f.length(),
+                        mtime = f.lastModified(),
+                        mime = Drive.mimeOf(f.name),
+                    )
+                )
+            )
+        }
+        return out
+    }
+
+    fun count(c: Context): Int = dir(c).listFiles()?.size ?: 0
+}
