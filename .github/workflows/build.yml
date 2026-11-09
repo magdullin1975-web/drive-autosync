@@ -28,8 +28,8 @@ jobs:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
         run: |
           if [ -z "$SIGNING_KEY" ]; then
-            echo "::error::Secret SIGNING_KEY is missing"
-            exit 1
+            echo "::warning::Secret SIGNING_KEY is missing - build check only, no release"
+            exit 0
           fi
           PW="${SIGNING_KEY%%:*}"
           echo "::add-mask::$PW"
@@ -41,9 +41,11 @@ jobs:
         run: gradle assembleRelease -PversionCode=${{ github.run_number }} --no-daemon --stacktrace
 
       - name: Rename APK
+        if: env.KEYSTORE_FILE != ''
         run: cp app/build/outputs/apk/release/app-release.apk DriveAutosync-${{ github.run_number }}.apk
 
       - name: Publish release
+        if: env.KEYSTORE_FILE != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
