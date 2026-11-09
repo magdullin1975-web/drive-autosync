@@ -28,7 +28,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -136,7 +135,7 @@ class MainActivity : Activity() {
         root.addView(header("Папки на этом устройстве"))
         folderBox = vbox()
         root.addView(folderBox)
-        root.addView(button("＋ Добавить папку") { pickFolder(null) })
+        root.addView(button("＋ Добавить папку") { pickFolder() })
 
         root.addView(header("Настройки"))
         root.addView(text("Главная папка на Google Диске:"))
@@ -181,7 +180,7 @@ class MainActivity : Activity() {
 
         permBox.removeAllViews()
         if (!Prefs.signedIn(this)) permBox.addView(button("1. Войти в Google") { signIn() })
-        if (!Storage.hasAccess(this)) permBox.addView(button("2. Разрешить доступ к файлам") { requestStorage() })
+        if (!Media.hasAccess(this)) permBox.addView(button("2. Разрешить доступ к фото и видео") { requestStorage() })
         val pm = getSystemService(PowerManager::class.java)
         if (pm != null && !pm.isIgnoringBatteryOptimizations(packageName)) {
             permBox.addView(button("3. Отключить экономию батареи для приложения") { requestBattery() })
@@ -199,12 +198,12 @@ class MainActivity : Activity() {
             shownFolders = folders
             folderBox.removeAllViews()
             if (folders.isEmpty()) {
-                folderBox.addView(text("Пока нет папок. Добавьте, например, Download и Pictures."))
+                folderBox.addView(text("Пока нет папок. Добавьте, например, Download и Pictures. Загружаются фото, видео и аудио."))
             }
             for (p in folders) {
                 val row = LinearLayout(this)
                 row.orientation = LinearLayout.HORIZONTAL
-                val t = text("📁 " + Storage.pretty(p))
+                val t = text("📁 " + p.trimEnd('/'))
                 row.addView(t, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
                 row.addView(button("Убрать") { confirmRemove(p) })
                 folderBox.addView(row)
@@ -262,89 +261,69 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------------ разрешения
 
     private fun requestStorage() {
-        if (Build.VERSION.SDK_INT >= 30) {
-            try {
-                startActivity(
-                    Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))
-                )
-            } catch (e: Exception) {
-                startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-            }
-        } else {
-            requestPermissions(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), RC_PERMS)
-        }
+        requestPermissions(Media.permissions(), RC_PERMS)
     }
 
     private fun requestBattery() {
+        // Без особых разрешений: открываем страницу приложения, там «Akku» → «Nicht eingeschränkt»
+        toast("Откройте «Akku» и выберите «Nicht eingeschränkt»")
         try {
-            startActivity(
-                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
-            )
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
         } catch (e: Exception) {
             startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
         }
     }
 
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == RC_PERMS && !Media.hasAccess(this) && Build.VERSION.SDK_INT >= 34) {
+            toast("Выберите «Alle zulassen» (разрешить все), а не «Fotos auswählen»")
+        }
+        refresh()
+    }
+
     // ------------------------------------------------------------------ выбор папок
 
-    private fun pickFolder(dir: File?) {
-        if (!Storage.hasAccess(this)) {
-            toast("Сначала разрешите доступ к файлам")
+    private fun pickFolder() {
+        if (!Media.hasAccess(this)) {
+            toast("Сначала разрешите доступ к фото и видео")
             requestStorage()
             return
         }
-        if (dir == null) {
-            val roots = Storage.roots(this)
-            val primary = Storage.primary()
-            val quick = listOf("Download", "Pictures", "DCIM", "Movies", "Music", "Documents")
-                .map { File(primary, it) }
-                .filter { it.isDirectory }
-            val choices = roots + quick
-            val labels = roots.mapIndexed { i, f -> if (i == 0) "📱 Вся память устройства" else "💾 Карта памяти (${f.name})" } +
-                quick.map { "📁 ${it.name}" }
-            AlertDialog.Builder(this)
-                .setTitle("Где искать папку?")
-                .setItems(labels.toTypedArray()) { _, w -> pickFolder(choices[w]) }
+        scope.launch {
+            val list = withContext(Dispatchers.IO) { Media.folders(this@MainActivity) }
+            if (list.isEmpty()) {
+                toast("На устройстве не найдено фото, видео или аудио")
+                return@launch
+            }
+            val labels = list.map { (p, n) ->
+                val depth = p.trimEnd('/').count { it == '/' }
+                "    ".repeat(depth) + "📁 " + p.trimEnd('/').substringAfterLast('/') + "  ($n)"
+            }
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("Какую папку загружать?")
+                .setItems(labels.toTypedArray()) { _, w -> askBaseline(list[w].first) }
                 .setNegativeButton("Отмена", null)
                 .show()
-            return
         }
-        val subs = (dir.listFiles() ?: emptyArray())
-            .filter { it.isDirectory && !it.name.startsWith(".") }
-            .sortedBy { it.name.lowercase() }
-        val labels = listOf("✔ Выбрать эту папку", "⬆ Назад") + subs.map { "📁 ${it.name}" }
-        AlertDialog.Builder(this)
-            .setTitle(Storage.pretty(dir.absolutePath))
-            .setItems(labels.toTypedArray()) { _, w ->
-                when (w) {
-                    0 -> askBaseline(dir)
-                    1 -> {
-                        val isRoot = Storage.roots(this).any { it.absolutePath == dir.absolutePath }
-                        pickFolder(if (isRoot) null else dir.parentFile)
-                    }
-                    else -> pickFolder(subs[w - 2])
-                }
-            }
-            .setNegativeButton("Отмена", null)
-            .show()
     }
 
-    private fun askBaseline(dir: File) {
-        if (Prefs.folders(this).contains(dir.absolutePath)) {
+    private fun askBaseline(folder: String) {
+        if (Prefs.folders(this).contains(folder)) {
             toast("Эта папка уже добавлена")
             return
         }
         AlertDialog.Builder(this)
-            .setTitle(dir.name)
+            .setTitle(folder.trimEnd('/'))
             .setMessage("Загрузить на Диск и файлы, которые уже лежат в этой папке?\n\n«Только новые» — загружать то, что появится с этого момента.")
-            .setPositiveButton("Да, все файлы") { _, _ -> addFolder(dir, 0L) }
-            .setNegativeButton("Только новые") { _, _ -> addFolder(dir, System.currentTimeMillis()) }
+            .setPositiveButton("Да, все файлы") { _, _ -> addFolder(folder, 0L) }
+            .setNegativeButton("Только новые") { _, _ -> addFolder(folder, System.currentTimeMillis()) }
             .setNeutralButton("Отмена", null)
             .show()
     }
 
-    private fun addFolder(dir: File, baseline: Long) {
-        Prefs.addFolder(this, dir.absolutePath, baseline)
+    private fun addFolder(folder: String, baseline: Long) {
+        Prefs.addFolder(this, folder, baseline)
         toast("Папка добавлена")
         Scheduler.syncNow(this)
         refresh()
@@ -353,7 +332,7 @@ class MainActivity : Activity() {
     private fun confirmRemove(path: String) {
         AlertDialog.Builder(this)
             .setTitle("Убрать папку?")
-            .setMessage("${Storage.pretty(path)}\n\nФайлы на телефоне и на Google Диске останутся, просто новые больше не будут загружаться.")
+            .setMessage("${path.trimEnd('/')}\n\nФайлы на телефоне и на Google Диске останутся, просто новые больше не будут загружаться.")
             .setPositiveButton("Убрать") { _, _ ->
                 Prefs.removeFolder(this, path)
                 refresh()
@@ -405,21 +384,11 @@ class MainActivity : Activity() {
     }
 
     private fun installUpdate(r: Release) {
-        if (!packageManager.canRequestPackageInstalls()) {
-            toast("Разрешите установку обновлений, затем нажмите «Обновить» ещё раз")
-            startActivity(
-                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
-            )
-            return
-        }
-        toast("Скачиваю обновление…")
-        scope.launch {
-            try {
-                val apk = withContext(Dispatchers.IO) { Updater.download(this@MainActivity, r) }
-                withContext(Dispatchers.IO) { Updater.install(this@MainActivity, apk) }
-            } catch (e: Exception) {
-                showError("Обновление не удалось", e.message ?: e.toString())
-            }
+        toast("Скачайте файл и откройте его — установится поверх, настройки сохранятся")
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(r.apkUrl)))
+        } catch (e: Exception) {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(Updater.PAGE)))
         }
     }
 

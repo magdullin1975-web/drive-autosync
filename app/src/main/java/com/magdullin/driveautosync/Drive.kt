@@ -13,8 +13,7 @@ import okhttp3.Response
 import okio.BufferedSink
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
-import java.io.FileInputStream
+import java.io.InputStream
 import java.io.IOException
 import java.time.Instant
 import java.util.concurrent.TimeUnit
@@ -148,12 +147,12 @@ class Drive(private val token: String) {
     }
 
     /** Отправляет файл (с места offset). Возвращает id файла на Диске. */
-    fun upload(session: String, f: File, offset: Long, size: Long, mime: String): String {
+    fun upload(session: String, open: () -> InputStream, offset: Long, size: Long, mime: String): String {
         val body = object : RequestBody() {
             override fun contentType(): MediaType? = mime.toMediaTypeOrNull()
             override fun contentLength(): Long = size - offset
             override fun writeTo(sink: BufferedSink) {
-                FileInputStream(f).use { input ->
+                open().use { input ->
                     var skipped = 0L
                     while (skipped < offset) {
                         val s = input.skip(offset - skipped)

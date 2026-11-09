@@ -14,7 +14,7 @@ android {
 
     defaultConfig {
         applicationId = "com.magdullin.driveautosync"
-        minSdk = 26
+        minSdk = 29
         targetSdk = 35
         versionCode = vCode
         versionName = "1.0.$vCode"

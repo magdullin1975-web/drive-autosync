@@ -1,7 +1,7 @@
 package com.magdullin.driveautosync
 
 import android.content.Context
-import java.io.File
+import java.io.IOException
 
 /** Папки на Google Диске: создаёт недостающие и запоминает их id. */
 class Folders(private val c: Context, private val drive: Drive) {
@@ -42,23 +42,21 @@ class Folders(private val c: Context, private val drive: Drive) {
 
 object Uploader {
 
-    /** Путь на Диске: <Главная папка>/<Устройство>/<Папка телефона>/<подпапки>. */
-    fun driveParts(c: Context, f: File, base: File): List<String> {
-        val parts = mutableListOf(Prefs.rootName(c), Prefs.deviceName(c), base.name)
-        val parent = f.parentFile
-        if (parent != null) {
-            val rel = parent.relativeTo(base).path
-            rel.split(File.separatorChar).filter { it.isNotEmpty() && it != "." }.forEach { parts.add(it) }
-        }
+    /** Путь на Диске: <Главная папка>/<Устройство>/<папка телефона и подпапки>. */
+    fun driveParts(c: Context, item: MediaItem): List<String> {
+        val parts = mutableListOf(Prefs.rootName(c), Prefs.deviceName(c))
+        item.relativePath.split('/').filter { it.isNotEmpty() }.forEach { parts.add(it) }
         return parts
     }
 
-    fun upload(c: Context, drive: Drive, db: Db, folders: Folders, f: File, base: File, rec: Db.Rec?) {
-        val parentId = folders.ensure(driveParts(c, f, base))
-        val size = f.length()
-        val mtime = f.lastModified()
-        val mime = Drive.mimeOf(f.name)
-        val path = f.absolutePath
+    fun upload(c: Context, drive: Drive, db: Db, folders: Folders, item: MediaItem, rec: Db.Rec?) {
+        val parentId = folders.ensure(driveParts(c, item))
+        val size = item.size
+        val mtime = item.mtime
+        val key = item.key
+        val open = {
+            c.contentResolver.openInputStream(item.uri) ?: throw IOException("Файл недоступен: ${item.name}")
+        }
 
         var session: String? =
             if (rec?.session != null && rec.sSize == size && rec.sMtime == mtime) rec.session else null
@@ -67,7 +65,7 @@ object Uploader {
         if (session != null) {
             when (val st = drive.status(session, size)) {
                 is UploadStatus.Done -> {
-                    db.markDone(path, size, mtime, st.id, f.name)
+                    db.markDone(key, size, mtime, st.id, item.name)
                     return
                 }
                 is UploadStatus.Partial -> offset = st.offset
@@ -78,42 +76,21 @@ object Uploader {
         if (session == null) {
             val existing = rec?.driveId?.takeIf { it.isNotEmpty() }
             val newSession = try {
-                drive.startUpload(f.name, parentId, existing, mime, size, mtime)
+                drive.startUpload(item.name, parentId, existing, item.mime, size, mtime)
             } catch (e: DriveException) {
                 if (existing != null && e.code == 404) {
-                    drive.startUpload(f.name, parentId, null, mime, size, mtime)
+                    drive.startUpload(item.name, parentId, null, item.mime, size, mtime)
                 } else {
                     throw e
                 }
             }
-            db.saveSession(path, newSession, size, mtime)
+            db.saveSession(key, newSession, size, mtime)
             session = newSession
             offset = 0L
         }
 
         val s = session ?: throw DriveException(0, "noSession", "Нет сессии загрузки")
-        val id = drive.upload(s, f, offset, size, mime)
-        db.markDone(path, size, mtime, id, f.name)
-    }
-}
-
-object Scanner {
-    /** Все файлы в папке и подпапках (кроме скрытых), от старых к новым. */
-    fun scan(dir: File): List<File> {
-        val out = ArrayList<File>()
-        walk(dir, 0, out)
-        return out.sortedBy { it.lastModified() }
-    }
-
-    private fun walk(d: File, depth: Int, out: MutableList<File>) {
-        val list = d.listFiles() ?: return
-        for (f in list) {
-            if (f.name.startsWith(".")) continue
-            if (f.isDirectory) {
-                if (depth < 6 && f.name != "Android") walk(f, depth + 1, out)
-            } else if (f.isFile) {
-                out.add(f)
-            }
-        }
+        val id = drive.upload(s, open, offset, size, item.mime)
+        db.markDone(key, size, mtime, id, item.name)
     }
 }

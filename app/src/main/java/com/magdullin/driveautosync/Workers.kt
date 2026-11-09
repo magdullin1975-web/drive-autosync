@@ -1,12 +1,8 @@
 package com.magdullin.driveautosync
 
-import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.os.Build
-import android.os.Environment
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -19,35 +15,8 @@ import androidx.work.WorkerParameters
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
-
-object Storage {
-    fun hasAccess(c: Context): Boolean =
-        if (Build.VERSION.SDK_INT >= 30) {
-            Environment.isExternalStorageManager()
-        } else {
-            c.checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) ==
-                PackageManager.PERMISSION_GRANTED
-        }
-
-    @Suppress("DEPRECATION")
-    fun primary(): File = Environment.getExternalStorageDirectory()
-
-    /** Внутренняя память и карта памяти (если есть). */
-    fun roots(c: Context): List<File> {
-        val res = mutableListOf(primary())
-        for (d in c.getExternalFilesDirs(null)) {
-            if (d == null) continue
-            val r = File(d.absolutePath.substringBefore("/Android/"))
-            if (res.none { it.absolutePath == r.absolutePath }) res.add(r)
-        }
-        return res
-    }
-
-    fun pretty(path: String): String = path.replace(primary().absolutePath, "Память")
-}
 
 object Net {
     fun isUnmetered(c: Context): Boolean {
@@ -117,12 +86,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val folders = Prefs.folders(c)
         if (folders.isEmpty()) return Result.success()
 
-        if (!Storage.hasAccess(c)) {
+        if (!Media.hasAccess(c)) {
             Notifier.problem(
-                c, Notifier.ID_STORAGE, "Нет доступа к файлам",
-                "Откройте Drive Autosync и нажмите «Разрешить доступ к файлам»."
+                c, Notifier.ID_STORAGE, "Нет доступа к фото и видео",
+                "Откройте Drive Autosync и нажмите «Разрешить доступ к фото и видео»."
             )
-            Prefs.recordError(c, "Нет доступа к файлам")
+            Prefs.recordError(c, "Нет доступа к фото и видео")
             return Result.success()
         }
         Notifier.clear(c, Notifier.ID_STORAGE)
@@ -169,34 +138,27 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
         try {
             dirs.validateRoot()
-            outer@ for (path in folders) {
-                val base = File(path)
-                if (!base.isDirectory) {
-                    lastErr = "Папка не найдена: ${Storage.pretty(path)}"
-                    continue
-                }
-                val baseline = Prefs.baseline(c, path)
-                for (f in Scanner.scan(base)) {
+            outer@ for (folder in folders) {
+                val baseline = Prefs.baseline(c, folder)
+                for (item in Media.scan(c, folder)) {
                     if (isStopped) break@outer
                     if (System.currentTimeMillis() - started > limit) {
                         more = true
                         break@outer
                     }
-                    val len = f.length()
-                    val mod = f.lastModified()
-                    if (len <= 0L || mod < baseline) continue
-                    if (System.currentTimeMillis() - mod < SETTLE_MS) {
+                    if (item.size <= 0L || item.mtime < baseline) continue
+                    if (System.currentTimeMillis() - item.mtime < SETTLE_MS) {
                         more = true // файл ещё записывается — заберём чуть позже
                         continue
                     }
-                    val rec = db.find(f.absolutePath)
-                    if (rec?.driveId != null && rec.size == len && rec.mtime == mod) continue
-                    if (wifiOnly && !unmetered && len > BIG_FILE) {
+                    val rec = db.find(item.key)
+                    if (rec?.driveId != null && rec.size == item.size && rec.mtime == item.mtime) continue
+                    if (wifiOnly && !unmetered && item.size > BIG_FILE) {
                         waitingWifi++
                         continue
                     }
                     try {
-                        Uploader.upload(c, drive, db, dirs, f, base, rec)
+                        Uploader.upload(c, drive, db, dirs, item, rec)
                     } catch (e: DriveException) {
                         when {
                             e.code == 401 -> {
@@ -214,7 +176,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                             else -> {
                                 if (e.code == 404) dirs.reset()
                                 failed++
-                                failedNames.add(f.name)
+                                failedNames.add(item.name)
                                 lastErr = e.message
                             }
                         }
@@ -267,10 +229,10 @@ class WatchdogWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
                 "Откройте Drive Autosync: проверьте интернет и отключите для приложения экономию батареи."
             )
         }
-        if (!Storage.hasAccess(c)) {
+        if (!Media.hasAccess(c)) {
             Notifier.problem(
-                c, Notifier.ID_STORAGE, "Нет доступа к файлам",
-                "Откройте Drive Autosync и нажмите «Разрешить доступ к файлам»."
+                c, Notifier.ID_STORAGE, "Нет доступа к фото и видео",
+                "Откройте Drive Autosync и нажмите «Разрешить доступ к фото и видео»."
             )
         }
         return Result.success()
