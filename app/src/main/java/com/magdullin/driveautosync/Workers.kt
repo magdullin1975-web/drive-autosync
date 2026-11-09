@@ -81,6 +81,18 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         }
     }
 
+    /** Доступ Google живёт около часа: при 401 получаем новый и продолжаем. */
+    private suspend fun refreshToken(c: Context, drive: Drive): Boolean {
+        Auth.clear(c, drive.token)
+        return when (val t = Auth.token(c)) {
+            is TokenResult.Ok -> {
+                drive.token = t.token
+                true
+            }
+            else -> false
+        }
+    }
+
     private suspend fun runSync(): Result {
         val c = applicationContext
         val folders = Prefs.folders(c)
@@ -141,7 +153,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             dirs.validateRoot()
             for ((qdir, item) in ShareQueue.items(c)) {
                 if (isStopped) break
-                Uploader.upload(c, drive, db, dirs, item, null)
+                try {
+                    Uploader.upload(c, drive, db, dirs, item, null)
+                } catch (e: DriveException) {
+                    if (e.code != 401 || !refreshToken(c, drive)) throw e
+                    Uploader.upload(c, drive, db, dirs, item, db.find(item.key))
+                }
                 qdir.deleteRecursively()
             }
             outer@ for (folder in folders) {
@@ -169,11 +186,21 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                         continue
                     }
                     try {
-                        Uploader.upload(c, drive, db, dirs, item, rec)
+                        try {
+                            Uploader.upload(c, drive, db, dirs, item, rec)
+                        } catch (e: DriveException) {
+                            if (e.code != 401 || !refreshToken(c, drive)) throw e
+                            // новый доступ — продолжаем тот же файл с места обрыва
+                            Uploader.upload(c, drive, db, dirs, item, db.find(item.key))
+                        }
                     } catch (e: DriveException) {
                         when {
                             e.code == 401 -> {
-                                Auth.clear(c, token)
+                                Prefs.setSignedIn(c, false)
+                                Notifier.problem(
+                                    c, Notifier.ID_AUTH, "Нужно войти в Google",
+                                    "Откройте Drive Autosync и нажмите «Войти в Google»."
+                                )
                                 throw e
                             }
                             e.reason == "storageQuotaExceeded" || e.reason == "quotaExceeded" -> {

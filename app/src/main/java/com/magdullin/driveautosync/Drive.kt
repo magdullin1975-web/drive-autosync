@@ -27,7 +27,7 @@ sealed class UploadStatus {
 }
 
 /** Минимальный клиент Google Drive API v3. */
-class Drive(private val token: String) {
+class Drive(@Volatile var token: String) {
 
     companion object {
         private const val API = "https://www.googleapis.com/drive/v3/files"
